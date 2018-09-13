@@ -19,7 +19,8 @@ const ROOM_OPTIONS =
 {
 	requestTimeout   : requestTimeout,
 	transportOptions : transportOptions,
-	turnServers      : turnServers
+	turnServers      : turnServers,
+	lastN            : 5
 };
 
 const VIDEO_CONSTRAINS =
@@ -70,6 +71,12 @@ export default class RoomClient
 		// mediasoup-client Room instance.
 		this._room = new mediasoupClient.Room(ROOM_OPTIONS);
 		this._room.roomId = roomId;
+
+		// LastN speakers
+		this._lastNSpeakers = ROOM_OPTIONS.lastN;
+
+		// Array of lastN speakers
+		this._lastN = [];
 
 		// Transport for sending.
 		this._sendTransport = null;
@@ -250,6 +257,22 @@ export default class RoomClient
 				this._dispatch(requestActions.notify({
 					type : 'error',
 					text : 'Could not get file history'
+				}));
+			});
+	}
+
+	getLastN()
+	{
+		logger.debug('getLastN()');
+
+		return this._protoo.send('lastn', {})
+			.catch((error) =>
+			{
+				logger.error('getLastN() | failed: %o', error);
+
+				this._dispatch(requestActions.notify({
+					type : 'error',
+					text : 'Could not get lastn'
 				}));
 			});
 	}
@@ -965,6 +988,72 @@ export default class RoomClient
 			});
 	}
 
+	// Resumes consumers based on lastN speakers
+	updateSpeakers()
+	{
+		logger.debug('updateSpeakers()');
+
+		return Promise.resolve()
+			.then(() =>
+			{
+				const speakers = this._lastN.slice(0, this._lastNSpeakers);
+
+				for (const peerName of speakers)
+				{
+					const peer = this._room.getPeerByName(peerName);
+
+					for (const consumer of peer.consumers)
+					{
+						if (consumer.appData.source !== 'webcam' ||
+							!consumer.supported ||
+							!consumer.locallyPaused)
+							continue;
+
+						consumer.resume();
+					}
+				}
+			})
+			.catch((error) =>
+			{
+				logger.error('updateSpeakers() failed: %o', error);
+			});
+	}
+
+	handleActiveSpeaker(peerName)
+	{
+		logger.debug('handleActiveSpeaker() [peerName:"%s"]', peerName);
+
+		const index = this._lastN.indexOf(peerName);
+
+		if (index > -1) // We have this speaker in the list, move to front
+		{
+			if (index >= this._lastNSpeakers) // We need to remove someone
+			{
+				const removePeer = this._lastN[this._lastNSpeakers - 1];
+
+				this.pausePeerVideo(removePeer);
+			}
+
+			this._lastN.splice(index, 1);
+			this._lastN = [ peerName ].concat(this._lastN);
+
+			this.updateSpeakers();
+		}
+		else // We don't have this speaker in the list, should not happen
+		{
+			if (this._lastN.length >= this._lastNSpeakers)
+			{
+				const removePeer = this._lastN[this._lastNSpeakers - 1];
+
+				this.pausePeerVideo(removePeer);
+			}
+
+			this._lastN = [ peerName ].concat(this._lastN);
+
+			this.updateSpeakers();
+		}
+	}
+
 	restartIce()
 	{
 		logger.debug('restartIce()');
@@ -1058,6 +1147,9 @@ export default class RoomClient
 
 					this._dispatch(
 						stateActions.setRoomActiveSpeaker(peerName));
+
+					if (peerName && peerName !== this._peerName)
+						this.handleActiveSpeaker();
 
 					break;
 				}
@@ -1194,6 +1286,23 @@ export default class RoomClient
 						logger.debug('Got files history');
 
 						this._dispatch(stateActions.addFileHistory(files));
+					}
+
+					break;
+				}
+
+				case 'lastn-receive':
+				{
+					accept();
+
+					const lastN = request.data.lastN;
+
+					if (lastN.length > 0)
+					{
+						logger.debug('Got lastN');
+
+						this._lastN = lastN;
+						this.updateSpeakers();
 					}
 
 					break;
@@ -1337,7 +1446,8 @@ export default class RoomClient
 
 				this.getChatHistory();
 				this.getFileHistory();
-				
+				this.getLastN();
+
 				this._dispatch(requestActions.notify(
 					{
 						text    : 'You are in the room',
@@ -1348,7 +1458,7 @@ export default class RoomClient
 
 				for (const peer of peers)
 				{
-					this._handlePeer(peer, { notify: false });
+					this._handlePeer(peer, { notify: false, initial: true });
 				}
 			})
 			.catch((error) =>
@@ -1859,7 +1969,7 @@ export default class RoomClient
 		}
 	}
 
-	_handlePeer(peer, { notify = true } = {})
+	_handlePeer(peer, { notify = true, initial = false } = {})
 	{
 		const displayName = peer.appData.displayName;
 
@@ -1880,6 +1990,16 @@ export default class RoomClient
 				}));
 		}
 
+		if (!initial) // New user after initial join
+		{
+			const index = this._lastN.indexOf(peer.name);
+
+			if (index > -1) // We don't have this peer in the list, add
+			{
+				this._lastN.push(peer.name);
+			}
+		}
+
 		for (const consumer of peer.consumers)
 		{
 			this._handleConsumer(consumer);
@@ -1892,6 +2012,13 @@ export default class RoomClient
 				peer.name, originator);
 
 			this._dispatch(stateActions.removePeer(peer.name));
+
+			const index = this._lastN.indexOf(peer.name);
+
+			if (index > -1) // We have this peer in the list, remove
+			{
+				this._lastN.splice(index, 1);
+			}
 
 			if (this._room.joined)
 			{
@@ -2007,9 +2134,9 @@ export default class RoomClient
 		// Receive the consumer (if we can).
 		if (consumer.supported)
 		{
-			// Pause it if video and we are in audio-only mode.
-			if (consumer.kind === 'video' && this._getState().me.audioOnly)
-				consumer.pause('audio-only-mode');
+			// Pause it if video
+			if (consumer.kind === 'video')
+				consumer.pause('audio-only');
 
 			consumer.receive(this._recvTransport)
 				.then((track) =>
@@ -2021,6 +2148,8 @@ export default class RoomClient
 					logger.error(
 						'unexpected error while receiving a new Consumer:%o', error);
 				});
+
+			this.updateSpeakers();
 		}
 	}
 }
