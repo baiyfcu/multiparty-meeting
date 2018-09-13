@@ -336,7 +336,7 @@ class Room extends EventEmitter
 					accept();
 
 					protooPeer.send('lastn-receive', {
-						lastN : this._lastN;
+						lastN : this._lastN
 					});
 
 					break;
@@ -380,7 +380,7 @@ class Room extends EventEmitter
 			if (mediaPeer && !mediaPeer.closed)
 				mediaPeer.close();
 
-			const index = this._lastN.indexOf(protooPeer.name);
+			const index = this._lastN.indexOf(protooPeer.id);
 
 			if (index > -1) // We have this peer in the list, remove
 			{

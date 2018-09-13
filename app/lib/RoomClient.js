@@ -20,7 +20,7 @@ const ROOM_OPTIONS =
 	requestTimeout   : requestTimeout,
 	transportOptions : transportOptions,
 	turnServers      : turnServers,
-	lastN            : 5
+	lastN            : 2
 };
 
 const VIDEO_CONSTRAINS =
@@ -998,20 +998,23 @@ export default class RoomClient
 			{
 				const speakers = this._lastN.slice(0, this._lastNSpeakers);
 
-				for (const peerName of speakers)
+				speakers.forEach((peerName) =>
 				{
 					const peer = this._room.getPeerByName(peerName);
 
-					for (const consumer of peer.consumers)
+					if (peer)
 					{
-						if (consumer.appData.source !== 'webcam' ||
-							!consumer.supported ||
-							!consumer.locallyPaused)
-							continue;
+						for (const consumer of peer.consumers)
+						{
+							if (consumer.appData.source !== 'webcam' ||
+								!consumer.supported ||
+								!consumer.locallyPaused)
+								continue;
 
-						consumer.resume();
+							consumer.resume();
+						}
 					}
-				}
+				});
 			})
 			.catch((error) =>
 			{
@@ -1148,8 +1151,8 @@ export default class RoomClient
 					this._dispatch(
 						stateActions.setRoomActiveSpeaker(peerName));
 
-					if (peerName && peerName !== this._peerName)
-						this.handleActiveSpeaker();
+					if (peerName && (peerName !== this._peerName))
+						this.handleActiveSpeaker(peerName);
 
 					break;
 				}
@@ -1301,7 +1304,12 @@ export default class RoomClient
 					{
 						logger.debug('Got lastN');
 
+						const index = lastN.indexOf(this._peerName);
+
+						lastN.splice(index, 1);
+
 						this._lastN = lastN;
+
 						this.updateSpeakers();
 					}
 
@@ -1367,7 +1375,16 @@ export default class RoomClient
 			logger.debug(
 				'room "newpeer" event [name:"%s", peer:%o]', peer.name, peer);
 
+			const index = this._lastN.indexOf(peer.name);
+
+			if (index === -1) // We don't have this peer in the list, add
+			{
+				this._lastN.push(peer.name);
+			}
+
 			this._handlePeer(peer);
+
+			this.updateSpeakers();
 		});
 
 		this._room.join(this._peerName, { displayName, device })
@@ -1458,8 +1475,10 @@ export default class RoomClient
 
 				for (const peer of peers)
 				{
-					this._handlePeer(peer, { notify: false, initial: true });
+					this._handlePeer(peer, { notify: false });
 				}
+
+				this.updateSpeakers();
 			})
 			.catch((error) =>
 			{
@@ -1969,7 +1988,7 @@ export default class RoomClient
 		}
 	}
 
-	_handlePeer(peer, { notify = true, initial = false } = {})
+	_handlePeer(peer, { notify = true } = {})
 	{
 		const displayName = peer.appData.displayName;
 
@@ -1990,16 +2009,6 @@ export default class RoomClient
 				}));
 		}
 
-		if (!initial) // New user after initial join
-		{
-			const index = this._lastN.indexOf(peer.name);
-
-			if (index > -1) // We don't have this peer in the list, add
-			{
-				this._lastN.push(peer.name);
-			}
-		}
-
 		for (const consumer of peer.consumers)
 		{
 			this._handleConsumer(consumer);
@@ -2018,6 +2027,7 @@ export default class RoomClient
 			if (index > -1) // We have this peer in the list, remove
 			{
 				this._lastN.splice(index, 1);
+				this.updateSpeakers();
 			}
 
 			if (this._room.joined)
@@ -2135,8 +2145,13 @@ export default class RoomClient
 		if (consumer.supported)
 		{
 			// Pause it if video
-			if (consumer.kind === 'video')
-				consumer.pause('audio-only');
+			if (consumer.kind === 'video' && this._getState().me.audioOnly)
+				consumer.pause('audio-only-mode');
+
+			const index = this._lastN.indexOf(consumer.peer.name);
+
+			if (consumer.kind === 'video' && ((index >= this._lastNSpeakers) || (index === -1)))
+				consumer.pause('not-speaker');
 
 			consumer.receive(this._recvTransport)
 				.then((track) =>
@@ -2148,8 +2163,6 @@ export default class RoomClient
 					logger.error(
 						'unexpected error while receiving a new Consumer:%o', error);
 				});
-
-			this.updateSpeakers();
 		}
 	}
 }
